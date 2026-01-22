@@ -1,0 +1,493 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Roles for Service Accounts (IRSA) for LGTM Stack on EKS'
+
+Parameters:
+  ClusterStackName:
+    Type: String
+    Description: Name of the CloudFormation stack that created the EKS cluster
+    Default: eks-cluster-stack
+  
+  S3StackName:
+    Type: String
+    Description: Name of the CloudFormation stack that created the S3 buckets
+    Default: lgtm-s3-stack
+  
+  ClusterName:
+    Type: String
+    Default: my-eks-cluster
+    Description: Name of the EKS cluster
+  
+  Namespace:
+    Type: String
+    Default: lgtm-stack
+    Description: Kubernetes namespace for LGTM stack
+  
+  ServiceAccountName:
+    Type: String
+    Default: lgtm-stack-sa
+    Description: Name of the Kubernetes service account
+
+Resources:
+  # ========================================
+  # IAM Policy for S3 Access
+  # ========================================
+  
+  LGTMS3AccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ClusterName}-lgtm-s3-access-policy'
+      Description: Policy for LGTM stack to access S3 buckets
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Loki S3 Access
+          - Sid: LokiS3Access
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - Fn::ImportValue: !Sub '${S3StackName}-LokiBucketArn'
+          
+          - Sid: LokiS3ObjectAccess
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+            Resource:
+              - !Sub
+                - '${BucketArn}/*'
+                - BucketArn:
+                    Fn::ImportValue: !Sub '${S3StackName}-LokiBucketArn'
+          
+          # Tempo S3 Access
+          - Sid: TempoS3Access
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - Fn::ImportValue: !Sub '${S3StackName}-TempoBucketArn'
+          
+          - Sid: TempoS3ObjectAccess
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+            Resource:
+              - !Sub
+                - '${BucketArn}/*'
+                - BucketArn:
+                    Fn::ImportValue: !Sub '${S3StackName}-TempoBucketArn'
+          
+          # Mimir S3 Access
+          - Sid: MimirS3Access
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - Fn::ImportValue: !Sub '${S3StackName}-MimirBucketArn'
+          
+          - Sid: MimirS3ObjectAccess
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListMultipartUploadParts
+              - s3:AbortMultipartUpload
+            Resource:
+              - !Sub
+                - '${BucketArn}/*'
+                - BucketArn:
+                    Fn::ImportValue: !Sub '${S3StackName}-MimirBucketArn'
+
+  # ========================================
+  # IRSA Role for LGTM Stack
+  # ========================================
+  
+  LGTMStackIRSARole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-lgtm-stack-irsa-role'
+      Description: IAM role for LGTM stack service account with IRSA
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub
+                  - '${OIDCProvider}:sub'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : !Sub 'system:serviceaccount:${Namespace}:${ServiceAccountName}'
+                !Sub
+                  - '${OIDCProvider}:aud'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : 'sts.amazonaws.com'
+      ManagedPolicyArns:
+        - !Ref LGTMS3AccessPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-lgtm-stack-irsa-role'
+        - Key: Component
+          Value: LGTM-Stack
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ========================================
+  # IRSA Role for EBS CSI Driver
+  # ========================================
+  
+  EBSCSIDriverPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ClusterName}-ebs-csi-driver-policy'
+      Description: Policy for EBS CSI Driver
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:CreateSnapshot
+              - ec2:AttachVolume
+              - ec2:DetachVolume
+              - ec2:ModifyVolume
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInstances
+              - ec2:DescribeSnapshots
+              - ec2:DescribeTags
+              - ec2:DescribeVolumes
+              - ec2:DescribeVolumesModifications
+            Resource: '*'
+          
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+            Resource:
+              - arn:aws:ec2:*:*:volume/*
+              - arn:aws:ec2:*:*:snapshot/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction:
+                  - CreateVolume
+                  - CreateSnapshot
+          
+          - Effect: Allow
+            Action:
+              - ec2:DeleteTags
+            Resource:
+              - arn:aws:ec2:*:*:volume/*
+              - arn:aws:ec2:*:*:snapshot/*
+          
+          - Effect: Allow
+            Action:
+              - ec2:CreateVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                aws:RequestTag/ebs.csi.aws.com/cluster: 'true'
+          
+          - Effect: Allow
+            Action:
+              - ec2:CreateVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                aws:RequestTag/CSIVolumeName: '*'
+          
+          - Effect: Allow
+            Action:
+              - ec2:DeleteVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+          
+          - Effect: Allow
+            Action:
+              - ec2:DeleteVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeName: '*'
+          
+          - Effect: Allow
+            Action:
+              - ec2:DeleteSnapshot
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeSnapshotName: '*'
+
+  EBSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-ebs-csi-driver-role'
+      Description: IAM role for EBS CSI Driver with IRSA
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub
+                  - '${OIDCProvider}:sub'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : 'system:serviceaccount:kube-system:ebs-csi-controller-sa'
+                !Sub
+                  - '${OIDCProvider}:aud'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : 'sts.amazonaws.com'
+      ManagedPolicyArns:
+        - !Ref EBSCSIDriverPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-ebs-csi-driver-role'
+        - Key: Component
+          Value: EBS-CSI-Driver
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ========================================
+  # IRSA Role for AWS Load Balancer Controller
+  # ========================================
+  
+  AWSLoadBalancerControllerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ClusterName}-aws-lb-controller-policy'
+      Description: Policy for AWS Load Balancer Controller
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: '*'
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+          
+          - Effect: Allow
+            Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcPeeringConnections
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:GetCoipPoolUsage
+              - ec2:DescribeCoipPools
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:DescribeSSLPolicies
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:DescribeTags
+            Resource: '*'
+          
+          - Effect: Allow
+            Action:
+              - cognito-idp:DescribeUserPoolClient
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+              - iam:ListServerCertificates
+              - iam:GetServerCertificate
+              - waf-regional:GetWebACL
+              - waf-regional:GetWebACLForResource
+              - waf-regional:AssociateWebACL
+              - waf-regional:DisassociateWebACL
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - wafv2:AssociateWebACL
+              - wafv2:DisassociateWebACL
+              - shield:GetSubscriptionState
+              - shield:DescribeProtection
+              - shield:CreateProtection
+              - shield:DeleteProtection
+            Resource: '*'
+          
+          - Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:CreateSecurityGroup
+            Resource: '*'
+          
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+            Resource: arn:aws:ec2:*:*:security-group/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: CreateSecurityGroup
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+          
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+              - ec2:DeleteTags
+            Resource: arn:aws:ec2:*:*:security-group/*
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:CreateTargetGroup
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+          
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:CreateRule
+              - elasticloadbalancing:DeleteRule
+            Resource: '*'
+          
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+            Resource:
+              - arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:SetIpAddressType
+              - elasticloadbalancing:SetSecurityGroups
+              - elasticloadbalancing:SetSubnets
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:ModifyTargetGroup
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:DeleteTargetGroup
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+          
+          - Effect: Allow
+            Action:
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:DeregisterTargets
+            Resource: arn:aws:elasticloadbalancing:*:*:targetgroup/*/*
+
+  AWSLoadBalancerControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-aws-lb-controller-role'
+      Description: IAM role for AWS Load Balancer Controller with IRSA
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub
+                  - '${OIDCProvider}:sub'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : 'system:serviceaccount:kube-system:aws-load-balancer-controller'
+                !Sub
+                  - '${OIDCProvider}:aud'
+                  - OIDCProvider:
+                      Fn::Select:
+                        - 1
+                        - Fn::Split:
+                            - 'oidc-provider/'
+                            - Fn::ImportValue: !Sub '${ClusterStackName}-OIDCProviderArn'
+                : 'sts.amazonaws.com'
+      ManagedPolicyArns:
+        - !Ref AWSLoadBalancerControllerPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-aws-lb-controller-role'
+        - Key: Component
+          Value: AWS-LB-Controller
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  LGTMStackIRSARoleArn:
+    Description: ARN of the LGTM Stack IRSA role
+    Value: !GetAtt LGTMStackIRSARole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LGTMStackIRSARoleArn'
+
+  EBSCSIDriverRoleArn:
+    Description: ARN of the EBS CSI Driver IRSA role
+    Value: !GetAtt EBSCSIDriverRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EBSCSIDriverRoleArn'
+
+  AWSLoadBalancerControllerRoleArn:
+    Description: ARN of the AWS Load Balancer Controller IRSA role
+    Value: !GetAtt AWSLoadBalancerControllerRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AWSLoadBalancerControllerRoleArn'

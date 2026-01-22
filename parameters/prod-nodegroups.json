@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "ClusterStackName",
+    "ParameterValue": "eks-cluster-stack"
+  },
+  {
+    "ParameterKey": "ClusterName",
+    "ParameterValue": "my-eks-cluster"
+  },
+  {
+    "ParameterKey": "GeneralNodeGroupDesiredSize",
+    "ParameterValue": "3"
+  },
+  {
+    "ParameterKey": "GeneralNodeInstanceType",
+    "ParameterValue": "m5.xlarge"
+  },
+  {
+    "ParameterKey": "MonitoringNodeGroupDesiredSize",
+    "ParameterValue": "3"
+  },
+  {
+    "ParameterKey": "MonitoringNodeInstanceType",
+    "ParameterValue": "m5.2xlarge"
+  }
+]

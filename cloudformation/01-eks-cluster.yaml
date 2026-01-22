@@ -1,0 +1,584 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Cluster for LGTM Stack - Single NAT Gateway (Cost Optimized for Dev/Staging)'
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: my-eks-cluster
+    Description: Name of the EKS cluster
+  
+  KubernetesVersion:
+    Type: String
+    Default: '1.31'
+    Description: Kubernetes version
+    AllowedValues:
+      - '1.29'
+      - '1.30'
+      - '1.31'
+  
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+  
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for public subnet 1
+  
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR block for public subnet 2
+  
+  PublicSubnet3CIDR:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: CIDR block for public subnet 3
+  
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: CIDR block for private subnet 1
+  
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.12.0/24
+    Description: CIDR block for private subnet 2
+  
+  PrivateSubnet3CIDR:
+    Type: String
+    Default: 10.0.13.0/24
+    Description: CIDR block for private subnet 3
+  
+  # NEW PARAMETER for NAT Gateway configuration
+  NATGatewayConfiguration:
+    Type: String
+    Default: Single
+    Description: 'Single NAT = Cost optimized (~$32/month), HighlyAvailable = 3 NATs (~$96/month)'
+    AllowedValues:
+      - Single
+      - HighlyAvailable
+
+Conditions:
+  # Condition to determine if we're using single NAT or HA NAT
+  UseSingleNAT: !Equals [!Ref NATGatewayConfiguration, 'Single']
+  UseHighlyAvailableNAT: !Equals [!Ref NATGatewayConfiguration, 'HighlyAvailable']
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'EKS Cluster Configuration'
+        Parameters:
+          - ClusterName
+          - KubernetesVersion
+      - Label:
+          default: 'Network Configuration'
+        Parameters:
+          - VpcCIDR
+          - NATGatewayConfiguration
+          - PublicSubnet1CIDR
+          - PublicSubnet2CIDR
+          - PublicSubnet3CIDR
+          - PrivateSubnet1CIDR
+          - PrivateSubnet2CIDR
+          - PrivateSubnet3CIDR
+
+Resources:
+  # VPC and Networking (same as before)
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-vpc'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-subnet-1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-subnet-2'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet3CIDR
+      AvailabilityZone: !Select [2, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-subnet-3'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-subnet-1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-subnet-2'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet3CIDR
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-subnet-3'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+
+  # ========================================
+  # NAT Gateway Configuration - SINGLE NAT
+  # ========================================
+  
+  # Single NAT Gateway (only created if UseSingleNAT is true)
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    Condition: UseSingleNAT
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-eip-1'
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Condition: UseSingleNAT
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-1-single'
+
+  # ========================================
+  # NAT Gateway Configuration - HIGHLY AVAILABLE (3 NATs)
+  # ========================================
+  
+  # NAT Gateway for HA - AZ1
+  NatGatewayHA1EIP:
+    Type: AWS::EC2::EIP
+    Condition: UseHighlyAvailableNAT
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-eip-ha-1'
+
+  NatGatewayHA1:
+    Type: AWS::EC2::NatGateway
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      AllocationId: !GetAtt NatGatewayHA1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-ha-1'
+
+  # NAT Gateway for HA - AZ2
+  NatGatewayHA2EIP:
+    Type: AWS::EC2::EIP
+    Condition: UseHighlyAvailableNAT
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-eip-ha-2'
+
+  NatGatewayHA2:
+    Type: AWS::EC2::NatGateway
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      AllocationId: !GetAtt NatGatewayHA2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-ha-2'
+
+  # NAT Gateway for HA - AZ3
+  NatGatewayHA3EIP:
+    Type: AWS::EC2::EIP
+    Condition: UseHighlyAvailableNAT
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-eip-ha-3'
+
+  NatGatewayHA3:
+    Type: AWS::EC2::NatGateway
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      AllocationId: !GetAtt NatGatewayHA3EIP.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-ha-3'
+
+  # ========================================
+  # Route Tables - PUBLIC
+  # ========================================
+  
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+
+  # ========================================
+  # Route Tables - PRIVATE (Single NAT)
+  # ========================================
+  
+  # Single route table for all private subnets (when using single NAT)
+  PrivateRouteTableSingle:
+    Type: AWS::EC2::RouteTable
+    Condition: UseSingleNAT
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-single'
+
+  PrivateRouteSingle:
+    Type: AWS::EC2::Route
+    Condition: UseSingleNAT
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableSingle
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociationSingle:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseSingleNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTableSingle
+
+  PrivateSubnet2RouteTableAssociationSingle:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseSingleNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTableSingle
+
+  PrivateSubnet3RouteTableAssociationSingle:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseSingleNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTableSingle
+
+  # ========================================
+  # Route Tables - PRIVATE (HA - 3 NATs)
+  # ========================================
+  
+  # Separate route table per AZ (when using HA NAT)
+  PrivateRouteTable1HA:
+    Type: AWS::EC2::RouteTable
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-ha-1'
+
+  PrivateRoute1HA:
+    Type: AWS::EC2::Route
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1HA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayHA1
+
+  PrivateSubnet1RouteTableAssociationHA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1HA
+
+  PrivateRouteTable2HA:
+    Type: AWS::EC2::RouteTable
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-ha-2'
+
+  PrivateRoute2HA:
+    Type: AWS::EC2::Route
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2HA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayHA2
+
+  PrivateSubnet2RouteTableAssociationHA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2HA
+
+  PrivateRouteTable3HA:
+    Type: AWS::EC2::RouteTable
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-ha-3'
+
+  PrivateRoute3HA:
+    Type: AWS::EC2::Route
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3HA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayHA3
+
+  PrivateSubnet3RouteTableAssociationHA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseHighlyAvailableNAT
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable3HA
+
+  # ========================================
+  # EKS Resources (same as before)
+  # ========================================
+  
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EKS cluster
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-cluster-sg'
+
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-cluster-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSVPCResourceController
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-cluster-role'
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref ClusterSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PrivateSubnet3
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+          - !Ref PublicSubnet3
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+
+  OIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EKSCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 9e99a48a9960b14926bb7f3b02e22da2b0ab7280
+
+Outputs:
+  ClusterName:
+    Description: EKS Cluster Name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterName'
+
+  ClusterArn:
+    Description: EKS Cluster ARN
+    Value: !GetAtt EKSCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterArn'
+
+  ClusterEndpoint:
+    Description: EKS Cluster Endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-ClusterEndpoint'
+
+  NATGatewayConfiguration:
+    Description: NAT Gateway configuration used
+    Value: !Ref NATGatewayConfiguration
+
+  EstimatedMonthlyCost:
+    Description: Estimated monthly cost for NAT Gateways
+    Value: !If
+      - UseSingleNAT
+      - '$32/month (Single NAT)'
+      - '$96/month (3 NAT Gateways - HA)'
+
+  OIDCProviderArn:
+    Description: OIDC Provider ARN
+    Value: !Ref OIDCProvider
+    Export:
+      Name: !Sub '${AWS::StackName}-OIDCProviderArn'
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PrivateSubnetIds:
+    Description: Private Subnet IDs
+    Value: !Join
+      - ','
+      - - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
+
+  PublicSubnetIds:
+    Description: Public Subnet IDs
+    Value: !Join
+      - ','
+      - - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetIds'

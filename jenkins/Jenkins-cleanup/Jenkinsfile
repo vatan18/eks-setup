@@ -1,0 +1,313 @@
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'prod'],
+            description: 'Target environment to cleanup'
+        )
+        string(
+            name: 'EKS_CLUSTER_NAME',
+            defaultValue: 'my-eks-cluster',
+            description: 'EKS cluster name'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+        string(
+            name: 'NAMESPACE',
+            defaultValue: 'lgtm-stack',
+            description: 'Kubernetes namespace for LGTM stack'
+        )
+        booleanParam(
+            name: 'DELETE_NAMESPACE',
+            defaultValue: false,
+            description: 'Delete the entire namespace (WARNING: This will remove everything)'
+        )
+        booleanParam(
+            name: 'DELETE_PVC',
+            defaultValue: true,
+            description: 'Delete Persistent Volume Claims (data will be lost)'
+        )
+        booleanParam(
+            name: 'CONFIRM_CLEANUP',
+            defaultValue: false,
+            description: 'REQUIRED: Confirm you want to cleanup the stack'
+        )
+    }
+    
+    environment {
+        AWS_CREDENTIALS = credentials('aws-credentials-id')
+        KUBECONFIG = "${WORKSPACE}/.kube/config"
+    }
+    
+    stages {
+        stage('Validate Cleanup Request') {
+            steps {
+                script {
+                    if (!params.CONFIRM_CLEANUP) {
+                        error("Cleanup not confirmed. Please check CONFIRM_CLEANUP parameter to proceed.")
+                    }
+                    
+                    echo """
+                    ================================
+                    CLEANUP CONFIRMATION
+                    ================================
+                    Environment: ${params.ENVIRONMENT}
+                    Cluster: ${params.EKS_CLUSTER_NAME}
+                    Namespace: ${params.NAMESPACE}
+                    Delete Namespace: ${params.DELETE_NAMESPACE}
+                    Delete PVCs: ${params.DELETE_PVC}
+                    ================================
+                    """
+                    
+                    // Additional safety for production
+                    if (params.ENVIRONMENT == 'prod') {
+                        timeout(time: 5, unit: 'MINUTES') {
+                            input message: 'Are you sure you want to cleanup PRODUCTION environment?',
+                                  ok: 'Yes, proceed with cleanup'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Configure AWS & EKS') {
+            steps {
+                script {
+                    echo "Configuring AWS credentials and EKS access..."
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_CREDENTIALS_USR}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_CREDENTIALS_PSW}
+                        
+                        aws eks update-kubeconfig \
+                            --name ${params.EKS_CLUSTER_NAME} \
+                            --region ${params.AWS_REGION} \
+                            --kubeconfig ${KUBECONFIG}
+                        
+                        kubectl --kubeconfig=${KUBECONFIG} cluster-info
+                    """
+                }
+            }
+        }
+        
+        stage('Backup Current State') {
+            steps {
+                script {
+                    echo "Creating backup of current configuration..."
+                    sh """
+                        mkdir -p backup/${params.ENVIRONMENT}
+                        
+                        # Backup Helm releases
+                        helm list -n ${params.NAMESPACE} -o yaml > backup/${params.ENVIRONMENT}/helm-releases.yaml || true
+                        
+                        # Backup ConfigMaps
+                        kubectl --kubeconfig=${KUBECONFIG} get configmaps -n ${params.NAMESPACE} -o yaml \
+                            > backup/${params.ENVIRONMENT}/configmaps.yaml || true
+                        
+                        # Backup Secrets (names only, not values)
+                        kubectl --kubeconfig=${KUBECONFIG} get secrets -n ${params.NAMESPACE} \
+                            > backup/${params.ENVIRONMENT}/secrets-list.txt || true
+                        
+                        # Backup PVC information
+                        kubectl --kubeconfig=${KUBECONFIG} get pvc -n ${params.NAMESPACE} -o yaml \
+                            > backup/${params.ENVIRONMENT}/pvcs.yaml || true
+                        
+                        echo "Backup completed at: backup/${params.ENVIRONMENT}/"
+                    """
+                    
+                    // Archive the backup
+                    archiveArtifacts artifacts: "backup/${params.ENVIRONMENT}/*", allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Uninstall Grafana Alloy') {
+            steps {
+                script {
+                    echo "Uninstalling Grafana Alloy..."
+                    sh """
+                        helm uninstall grafana-alloy --namespace ${params.NAMESPACE} || echo "Grafana Alloy not found or already uninstalled"
+                    """
+                }
+            }
+        }
+        
+        stage('Uninstall LGTM Stack') {
+            steps {
+                script {
+                    echo "Uninstalling LGTM stack..."
+                    sh """
+                        helm uninstall lgtm-stack --namespace ${params.NAMESPACE} || echo "LGTM stack not found or already uninstalled"
+                    """
+                }
+            }
+        }
+        
+        stage('Wait for Pods Termination') {
+            steps {
+                script {
+                    echo "Waiting for pods to terminate..."
+                    sh """
+                        kubectl --kubeconfig=${KUBECONFIG} wait --for=delete pod \
+                            --all -n ${params.NAMESPACE} --timeout=300s || true
+                    """
+                }
+            }
+        }
+        
+        stage('Delete PVCs') {
+            when {
+                expression { params.DELETE_PVC == true }
+            }
+            steps {
+                script {
+                    echo "Deleting Persistent Volume Claims..."
+                    sh """
+                        echo "Current PVCs:"
+                        kubectl --kubeconfig=${KUBECONFIG} get pvc -n ${params.NAMESPACE}
+                        
+                        echo "Deleting all PVCs..."
+                        kubectl --kubeconfig=${KUBECONFIG} delete pvc --all -n ${params.NAMESPACE} --timeout=300s || true
+                        
+                        echo "Remaining PVCs (if any):"
+                        kubectl --kubeconfig=${KUBECONFIG} get pvc -n ${params.NAMESPACE} || echo "No PVCs remaining"
+                    """
+                }
+            }
+        }
+        
+        stage('Delete ConfigMaps and Secrets') {
+            steps {
+                script {
+                    echo "Cleaning up ConfigMaps and Secrets created by LGTM stack..."
+                    sh """
+                        # Delete ConfigMaps with LGTM labels
+                        kubectl --kubeconfig=${KUBECONFIG} delete configmap \
+                            -n ${params.NAMESPACE} \
+                            -l app.kubernetes.io/instance=lgtm-stack || true
+                        
+                        # Delete Secrets with LGTM labels (be careful with this)
+                        kubectl --kubeconfig=${KUBECONFIG} delete secret \
+                            -n ${params.NAMESPACE} \
+                            -l app.kubernetes.io/instance=lgtm-stack || true
+                    """
+                }
+            }
+        }
+        
+        stage('Delete Services and Ingresses') {
+            steps {
+                script {
+                    echo "Deleting services and ingresses..."
+                    sh """
+                        # Delete Services
+                        kubectl --kubeconfig=${KUBECONFIG} delete svc \
+                            -n ${params.NAMESPACE} \
+                            -l app.kubernetes.io/instance=lgtm-stack || true
+                        
+                        # Delete Ingresses
+                        kubectl --kubeconfig=${KUBECONFIG} delete ingress \
+                            -n ${params.NAMESPACE} \
+                            -l app.kubernetes.io/instance=lgtm-stack || true
+                    """
+                }
+            }
+        }
+        
+        stage('Delete Namespace') {
+            when {
+                expression { params.DELETE_NAMESPACE == true }
+            }
+            steps {
+                script {
+                    echo "Deleting namespace ${params.NAMESPACE}..."
+                    sh """
+                        kubectl --kubeconfig=${KUBECONFIG} delete namespace ${params.NAMESPACE} --timeout=300s || true
+                        
+                        # Wait for namespace deletion
+                        for i in {1..60}; do
+                            if ! kubectl --kubeconfig=${KUBECONFIG} get namespace ${params.NAMESPACE} 2>/dev/null; then
+                                echo "Namespace deleted successfully"
+                                break
+                            fi
+                            echo "Waiting for namespace deletion... (\$i/60)"
+                            sleep 5
+                        done
+                    """
+                }
+            }
+        }
+        
+        stage('Verify Cleanup') {
+            steps {
+                script {
+                    echo "Verifying cleanup..."
+                    sh """
+                        echo "=== Helm Releases in namespace ==="
+                        helm list -n ${params.NAMESPACE} || echo "No releases found"
+                        
+                        if [ "${params.DELETE_NAMESPACE}" = "false" ]; then
+                            echo "=== Remaining Resources in namespace ==="
+                            kubectl --kubeconfig=${KUBECONFIG} get all -n ${params.NAMESPACE} || echo "Namespace clean or deleted"
+                            
+                            echo "=== Remaining PVCs ==="
+                            kubectl --kubeconfig=${KUBECONFIG} get pvc -n ${params.NAMESPACE} || echo "No PVCs found"
+                        else
+                            echo "Namespace ${params.NAMESPACE} should be deleted"
+                            kubectl --kubeconfig=${KUBECONFIG} get namespace ${params.NAMESPACE} || echo "Namespace successfully deleted"
+                        fi
+                    """
+                }
+            }
+        }
+        
+        stage('Cleanup Orphaned Resources') {
+            steps {
+                script {
+                    echo "Checking for orphaned resources..."
+                    sh """
+                        # Check for orphaned PVs
+                        echo "=== Checking for Released PVs ==="
+                        kubectl --kubeconfig=${KUBECONFIG} get pv | grep Released || echo "No released PVs found"
+                        
+                        # List any LoadBalancers that might still exist
+                        echo "=== Checking for LoadBalancer services in all namespaces ==="
+                        kubectl --kubeconfig=${KUBECONFIG} get svc --all-namespaces | grep LoadBalancer | grep lgtm || echo "No LGTM LoadBalancers found"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo """
+            ================================
+            CLEANUP COMPLETED SUCCESSFULLY
+            ================================
+            Environment: ${params.ENVIRONMENT}
+            Namespace: ${params.NAMESPACE}
+            Deleted Namespace: ${params.DELETE_NAMESPACE}
+            Deleted PVCs: ${params.DELETE_PVC}
+            ================================
+            """
+        }
+        failure {
+            echo "Cleanup failed! Please check the logs and manually verify resources."
+            script {
+                sh """
+                    echo "Resources that may still exist:"
+                    kubectl --kubeconfig=${KUBECONFIG} get all -n ${params.NAMESPACE} || true
+                """
+            }
+        }
+        always {
+            echo "Cleanup pipeline execution completed."
+            cleanWs()
+        }
+    }
+}
