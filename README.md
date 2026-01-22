@@ -1,2 +1,0 @@
-# eks-setup
-eks-setup
