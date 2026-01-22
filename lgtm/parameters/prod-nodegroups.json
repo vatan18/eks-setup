@@ -1,26 +1,17 @@
 [
-  {
-    "ParameterKey": "ClusterStackName",
-    "ParameterValue": "eks-cluster-stack"
-  },
-  {
-    "ParameterKey": "ClusterName",
-    "ParameterValue": "my-eks-cluster"
-  },
-  {
-    "ParameterKey": "GeneralNodeGroupDesiredSize",
-    "ParameterValue": "3"
-  },
-  {
-    "ParameterKey": "GeneralNodeInstanceType",
-    "ParameterValue": "m5.xlarge"
-  },
-  {
-    "ParameterKey": "MonitoringNodeGroupDesiredSize",
-    "ParameterValue": "3"
-  },
-  {
-    "ParameterKey": "MonitoringNodeInstanceType",
-    "ParameterValue": "m5.2xlarge"
-  }
+  { "ParameterKey": "ClusterStackName", "ParameterValue": "lgtm-eks-prod-stack" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "lgtm-eks-prod" },
+  { "ParameterKey": "KeyPairName", "ParameterValue": "prod-eks-key" },
+
+  { "ParameterKey": "GeneralNodeGroupDesiredSize", "ParameterValue": "4" },
+  { "ParameterKey": "GeneralNodeGroupMinSize", "ParameterValue": "3" },
+  { "ParameterKey": "GeneralNodeGroupMaxSize", "ParameterValue": "10" },
+  { "ParameterKey": "GeneralNodeInstanceType", "ParameterValue": "m5.xlarge" },
+
+  { "ParameterKey": "MonitoringNodeGroupDesiredSize", "ParameterValue": "3" },
+  { "ParameterKey": "MonitoringNodeGroupMinSize", "ParameterValue": "3" },
+  { "ParameterKey": "MonitoringNodeGroupMaxSize", "ParameterValue": "6" },
+  { "ParameterKey": "MonitoringNodeInstanceType", "ParameterValue": "m5.2xlarge" },
+
+  { "ParameterKey": "NodeVolumeSize", "ParameterValue": "200" }
 ]

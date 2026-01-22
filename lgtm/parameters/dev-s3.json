@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "Environment", "ParameterValue": "dev" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "lgtm-eks-dev" },
+  { "ParameterKey": "EnableVersioning", "ParameterValue": "false" },
+  { "ParameterKey": "EnableLifecyclePolicy", "ParameterValue": "true" },
+  { "ParameterKey": "RetentionDays", "ParameterValue": "30" }
+]

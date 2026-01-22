@@ -1,0 +1,17 @@
+[
+  { "ParameterKey": "ClusterStackName", "ParameterValue": "lgtm-eks-dev-stack" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "lgtm-eks-dev" },
+  { "ParameterKey": "KeyPairName", "ParameterValue": "" },
+
+  { "ParameterKey": "GeneralNodeGroupDesiredSize", "ParameterValue": "2" },
+  { "ParameterKey": "GeneralNodeGroupMinSize", "ParameterValue": "1" },
+  { "ParameterKey": "GeneralNodeGroupMaxSize", "ParameterValue": "4" },
+  { "ParameterKey": "GeneralNodeInstanceType", "ParameterValue": "m5.large" },
+
+  { "ParameterKey": "MonitoringNodeGroupDesiredSize", "ParameterValue": "2" },
+  { "ParameterKey": "MonitoringNodeGroupMinSize", "ParameterValue": "2" },
+  { "ParameterKey": "MonitoringNodeGroupMaxSize", "ParameterValue": "4" },
+  { "ParameterKey": "MonitoringNodeInstanceType", "ParameterValue": "m5.xlarge" },
+
+  { "ParameterKey": "NodeVolumeSize", "ParameterValue": "100" }
+]

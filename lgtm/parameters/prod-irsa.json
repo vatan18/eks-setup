@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "ClusterStackName", "ParameterValue": "lgtm-eks-prod-stack" },
+  { "ParameterKey": "S3StackName", "ParameterValue": "lgtm-s3-prod-stack" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "lgtm-eks-prod" },
+  { "ParameterKey": "Namespace", "ParameterValue": "lgtm" },
+  { "ParameterKey": "ServiceAccountName", "ParameterValue": "lgtm-sa" }
+]
