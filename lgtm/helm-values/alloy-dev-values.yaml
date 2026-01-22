@@ -1,0 +1,254 @@
+# helm-values/lgtm-dev-values.yaml
+# Development LGTM Stack Configuration (Minimal Resources)
+
+# Global settings
+global:
+  clusterDomain: cluster.local
+
+# Loki Configuration
+loki:
+  enabled: true
+  
+  # Single replica for dev
+  replication_factor: 1
+  
+  # Shorter retention for dev
+  retention_period: 7d
+  
+  # Distributor
+  distributor:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  
+  # Ingester
+  ingester:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Querier
+  querier:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  
+  # Query Frontend
+  queryFrontend:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Grafana Configuration
+grafana:
+  enabled: true
+  
+  replicas: 1
+  
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  
+  # Persistence
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 5Gi
+  
+  # Admin credentials
+  adminUser: admin
+  adminPassword: admin123  # Change in production!
+  
+  # Service
+  service:
+    type: LoadBalancer
+    port: 80
+  
+  # Data sources
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Loki
+          type: loki
+          access: proxy
+          url: http://lgtm-stack-loki-gateway
+          isDefault: false
+        - name: Tempo
+          type: tempo
+          access: proxy
+          url: http://lgtm-stack-tempo-gateway:3100
+          isDefault: false
+        - name: Mimir
+          type: prometheus
+          access: proxy
+          url: http://lgtm-stack-mimir-gateway/prometheus
+          isDefault: true
+
+# Tempo Configuration
+tempo:
+  enabled: true
+  
+  # Distributor
+  distributor:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  
+  # Ingester
+  ingester:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Querier
+  querier:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  
+  # Compactor
+  compactor:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Mimir Configuration
+mimir:
+  enabled: true
+  
+  # Distributor
+  distributor:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Ingester
+  ingester:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+  
+  # Store Gateway
+  store_gateway:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Compactor
+  compactor:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Querier
+  querier:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  
+  # Query Frontend
+  query_frontend:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Service Account
+serviceAccount:
+  create: true
+  name: lgtm-stack-sa

@@ -1,0 +1,375 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Node Groups - General and Monitoring (with taints) for LGTM Stack'
+
+Parameters:
+  ClusterStackName:
+    Type: String
+    Description: Name of the CloudFormation stack that created the EKS cluster
+    Default: eks-cluster-stack
+  
+  ClusterName:
+    Type: String
+    Default: my-eks-cluster
+    Description: Name of the EKS cluster
+  
+  KeyPairName:
+    Type: String
+    Description: EC2 Key Pair for SSH access (optional)
+    Default: ''
+  
+  # General Node Group Parameters
+  GeneralNodeGroupDesiredSize:
+    Type: Number
+    Default: 3
+    Description: Desired number of nodes in general node group
+  
+  GeneralNodeGroupMinSize:
+    Type: Number
+    Default: 2
+    Description: Minimum number of nodes in general node group
+  
+  GeneralNodeGroupMaxSize:
+    Type: Number
+    Default: 10
+    Description: Maximum number of nodes in general node group
+  
+  GeneralNodeInstanceType:
+    Type: String
+    Default: m5.xlarge
+    Description: EC2 instance type for general workloads
+    AllowedValues:
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+  
+  # Monitoring Node Group Parameters
+  MonitoringNodeGroupDesiredSize:
+    Type: Number
+    Default: 3
+    Description: Desired number of nodes in monitoring node group
+  
+  MonitoringNodeGroupMinSize:
+    Type: Number
+    Default: 3
+    Description: Minimum number of nodes in monitoring node group
+  
+  MonitoringNodeGroupMaxSize:
+    Type: Number
+    Default: 6
+    Description: Maximum number of nodes in monitoring node group
+  
+  MonitoringNodeInstanceType:
+    Type: String
+    Default: m5.2xlarge
+    Description: EC2 instance type for monitoring workloads
+    AllowedValues:
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+      - r5.xlarge
+      - r5.2xlarge
+      - r5.4xlarge
+  
+  NodeVolumeSize:
+    Type: Number
+    Default: 100
+    Description: Size of EBS volume for nodes (GB)
+    MinValue: 20
+    MaxValue: 500
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+  # ========================================
+  # IAM Role for Node Groups
+  # ========================================
+  
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-node-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-node-role'
+
+  # Additional policy for EBS CSI Driver
+  NodeEBSCSIPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ClusterName}-node-ebs-csi-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:CreateSnapshot
+              - ec2:AttachVolume
+              - ec2:DetachVolume
+              - ec2:ModifyVolume
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInstances
+              - ec2:DescribeSnapshots
+              - ec2:DescribeTags
+              - ec2:DescribeVolumes
+              - ec2:DescribeVolumesModifications
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - ec2:CreateTags
+            Resource:
+              - arn:aws:ec2:*:*:volume/*
+              - arn:aws:ec2:*:*:snapshot/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction:
+                  - CreateVolume
+                  - CreateSnapshot
+          - Effect: Allow
+            Action:
+              - ec2:DeleteTags
+            Resource:
+              - arn:aws:ec2:*:*:volume/*
+              - arn:aws:ec2:*:*:snapshot/*
+          - Effect: Allow
+            Action:
+              - ec2:CreateVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                aws:RequestTag/ebs.csi.aws.com/cluster: 'true'
+          - Effect: Allow
+            Action:
+              - ec2:CreateVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                aws:RequestTag/CSIVolumeName: '*'
+          - Effect: Allow
+            Action:
+              - ec2:DeleteVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+          - Effect: Allow
+            Action:
+              - ec2:DeleteVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeName: '*'
+          - Effect: Allow
+            Action:
+              - ec2:DeleteVolume
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/kubernetes.io/created-for/pvc/name: '*'
+          - Effect: Allow
+            Action:
+              - ec2:DeleteSnapshot
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeSnapshotName: '*'
+          - Effect: Allow
+            Action:
+              - ec2:DeleteSnapshot
+            Resource: '*'
+            Condition:
+              StringLike:
+                ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+      Roles:
+        - !Ref NodeInstanceRole
+
+  # ========================================
+  # Launch Template for General Nodes
+  # ========================================
+  
+  GeneralNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ClusterName}-general-node-template'
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref NodeVolumeSize
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ClusterName}-general-node'
+              - Key: NodeGroup
+                Value: general
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${ClusterName}-general-node-volume'
+
+  # ========================================
+  # Launch Template for Monitoring Nodes
+  # ========================================
+  
+  MonitoringNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ClusterName}-monitoring-node-template'
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref NodeVolumeSize
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 125
+              DeleteOnTermination: true
+              Encrypted: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ClusterName}-monitoring-node'
+              - Key: NodeGroup
+                Value: monitoring
+              - Key: workload
+                Value: monitoring
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${ClusterName}-monitoring-node-volume'
+
+  # ========================================
+  # General Node Group
+  # ========================================
+  
+  GeneralNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: !Sub '${ClusterName}-general-nodegroup'
+      ClusterName: !Ref ClusterName
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      Subnets:
+        Fn::Split:
+          - ','
+          - Fn::ImportValue: !Sub '${ClusterStackName}-PrivateSubnetIds'
+      
+      ScalingConfig:
+        MinSize: !Ref GeneralNodeGroupMinSize
+        DesiredSize: !Ref GeneralNodeGroupDesiredSize
+        MaxSize: !Ref GeneralNodeGroupMaxSize
+      
+      UpdateConfig:
+        MaxUnavailable: 1
+      
+      LaunchTemplate:
+        Id: !Ref GeneralNodeLaunchTemplate
+        Version: !GetAtt GeneralNodeLaunchTemplate.LatestVersionNumber
+      
+      InstanceTypes:
+        - !Ref GeneralNodeInstanceType
+      
+      Labels:
+        nodegroup-type: general
+        workload: general
+      
+      Tags:
+        Name: !Sub '${ClusterName}-general-nodegroup'
+        Environment: production
+        ManagedBy: CloudFormation
+
+  # ========================================
+  # Monitoring Node Group (with Taints)
+  # ========================================
+  
+  MonitoringNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      NodegroupName: !Sub '${ClusterName}-monitoring-nodegroup'
+      ClusterName: !Ref ClusterName
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      Subnets:
+        Fn::Split:
+          - ','
+          - Fn::ImportValue: !Sub '${ClusterStackName}-PrivateSubnetIds'
+      
+      ScalingConfig:
+        MinSize: !Ref MonitoringNodeGroupMinSize
+        DesiredSize: !Ref MonitoringNodeGroupDesiredSize
+        MaxSize: !Ref MonitoringNodeGroupMaxSize
+      
+      UpdateConfig:
+        MaxUnavailable: 1
+      
+      LaunchTemplate:
+        Id: !Ref MonitoringNodeLaunchTemplate
+        Version: !GetAtt MonitoringNodeLaunchTemplate.LatestVersionNumber
+      
+      InstanceTypes:
+        - !Ref MonitoringNodeInstanceType
+      
+      # Node Labels
+      Labels:
+        nodegroup-type: monitoring
+        workload: monitoring
+      
+      # Taints - This prevents regular workloads from scheduling on these nodes
+      Taints:
+        - Key: workload
+          Value: monitoring
+          Effect: NO_SCHEDULE
+      
+      Tags:
+        Name: !Sub '${ClusterName}-monitoring-nodegroup'
+        Environment: production
+        ManagedBy: CloudFormation
+        Purpose: LGTM-Stack
+
+Outputs:
+  NodeInstanceRoleArn:
+    Description: ARN of the node instance role
+    Value: !GetAtt NodeInstanceRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-NodeInstanceRoleArn'
+
+  GeneralNodeGroupName:
+    Description: Name of the general node group
+    Value: !Ref GeneralNodeGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-GeneralNodeGroupName'
+
+  MonitoringNodeGroupName:
+    Description: Name of the monitoring node group
+    Value: !Ref MonitoringNodeGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-MonitoringNodeGroupName'
+
+  MonitoringNodeGroupStatus:
+    Description: Status of the monitoring node group
+    Value: !GetAtt MonitoringNodeGroup.Status
+    Export:
+      Name: !Sub '${AWS::StackName}-MonitoringNodeGroupStatus'

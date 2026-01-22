@@ -1,0 +1,284 @@
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'prod'],
+            description: 'Target environment'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['deploy', 'upgrade', 'rollback'],
+            description: 'Deployment action'
+        )
+        string(
+            name: 'EKS_CLUSTER_NAME',
+            defaultValue: 'my-eks-cluster',
+            description: 'EKS cluster name'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+        string(
+            name: 'NAMESPACE',
+            defaultValue: 'lgtm-stack',
+            description: 'Kubernetes namespace for LGTM stack'
+        )
+        string(
+            name: 'HELM_CHART_VERSION',
+            defaultValue: '1.0.0',
+            description: 'LGTM Helm chart version'
+        )
+    }
+    
+    environment {
+        AWS_CREDENTIALS = credentials('aws-credentials-id')
+        KUBECONFIG = "${WORKSPACE}/.kube/config"
+        HELM_REPO = 'https://grafana.github.io/helm-charts'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out repository..."
+                    // Checkout your repository containing values files
+                    checkout scm
+                }
+            }
+        }
+        
+        stage('Setup Tools') {
+            steps {
+                script {
+                    echo "Installing required tools..."
+                    sh '''
+                        # Install kubectl if not present
+                        if ! command -v kubectl &> /dev/null; then
+                            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            chmod +x kubectl
+                            sudo mv kubectl /usr/local/bin/
+                        fi
+                        
+                        # Install helm if not present
+                        if ! command -v helm &> /dev/null; then
+                            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                        fi
+                        
+                        # Install AWS CLI if not present
+                        if ! command -v aws &> /dev/null; then
+                            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                            unzip -q awscliv2.zip
+                            sudo ./aws/install
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Configure AWS & EKS') {
+            steps {
+                script {
+                    echo "Configuring AWS credentials and EKS access..."
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_CREDENTIALS_USR}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_CREDENTIALS_PSW}
+                        
+                        # Update kubeconfig for EKS
+                        aws eks update-kubeconfig \
+                            --name ${params.EKS_CLUSTER_NAME} \
+                            --region ${params.AWS_REGION} \
+                            --kubeconfig ${KUBECONFIG}
+                        
+                        # Verify cluster connection
+                        kubectl --kubeconfig=${KUBECONFIG} cluster-info
+                    """
+                }
+            }
+        }
+        
+        stage('Create Namespace') {
+            steps {
+                script {
+                    echo "Creating namespace if it doesn't exist..."
+                    sh """
+                        kubectl --kubeconfig=${KUBECONFIG} create namespace ${params.NAMESPACE} --dry-run=client -o yaml | \
+                        kubectl --kubeconfig=${KUBECONFIG} apply -f -
+                    """
+                }
+            }
+        }
+        
+        stage('Add Helm Repository') {
+            steps {
+                script {
+                    echo "Adding Grafana Helm repository..."
+                    sh """
+                        helm repo add grafana ${HELM_REPO}
+                        helm repo update
+                    """
+                }
+            }
+        }
+        
+        stage('Prepare Values File') {
+            steps {
+                script {
+                    echo "Preparing Helm values file for ${params.ENVIRONMENT}..."
+                    
+                    // Select appropriate values file based on environment
+                    def valuesFile = "helm-values/lgtm-${params.ENVIRONMENT}-values.yaml"
+                    
+                    sh """
+                        if [ ! -f ${valuesFile} ]; then
+                            echo "Values file ${valuesFile} not found!"
+                            exit 1
+                        fi
+                        
+                        echo "Using values file: ${valuesFile}"
+                        cp ${valuesFile} current-values.yaml
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy LGTM Stack') {
+            when {
+                expression { params.ACTION == 'deploy' || params.ACTION == 'upgrade' }
+            }
+            steps {
+                script {
+                    echo "Deploying LGTM stack to ${params.ENVIRONMENT}..."
+                    
+                    sh """
+                        helm ${params.ACTION == 'deploy' ? 'install' : 'upgrade'} lgtm-stack \
+                            grafana/lgtm-distributed \
+                            --namespace ${params.NAMESPACE} \
+                            --values current-values.yaml \
+                            --version ${params.HELM_CHART_VERSION} \
+                            --create-namespace \
+                            --wait \
+                            --timeout 15m \
+                            ${params.ACTION == 'upgrade' ? '--install' : ''}
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy Grafana Alloy') {
+            when {
+                expression { params.ACTION == 'deploy' || params.ACTION == 'upgrade' }
+            }
+            steps {
+                script {
+                    echo "Deploying Grafana Alloy agent..."
+                    
+                    def alloyValuesFile = "helm-values/alloy-${params.ENVIRONMENT}-values.yaml"
+                    
+                    sh """
+                        helm ${params.ACTION == 'deploy' ? 'install' : 'upgrade'} grafana-alloy \
+                            grafana/alloy \
+                            --namespace ${params.NAMESPACE} \
+                            --values ${alloyValuesFile} \
+                            --wait \
+                            --timeout 10m \
+                            ${params.ACTION == 'upgrade' ? '--install' : ''}
+                    """
+                }
+            }
+        }
+        
+        stage('Rollback') {
+            when {
+                expression { params.ACTION == 'rollback' }
+            }
+            steps {
+                script {
+                    echo "Rolling back LGTM stack..."
+                    sh """
+                        helm rollback lgtm-stack --namespace ${params.NAMESPACE}
+                        helm rollback grafana-alloy --namespace ${params.NAMESPACE}
+                    """
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            when {
+                expression { params.ACTION == 'deploy' || params.ACTION == 'upgrade' }
+            }
+            steps {
+                script {
+                    echo "Verifying deployment..."
+                    sh """
+                        echo "Checking pod status..."
+                        kubectl --kubeconfig=${KUBECONFIG} get pods -n ${params.NAMESPACE}
+                        
+                        echo "Checking services..."
+                        kubectl --kubeconfig=${KUBECONFIG} get svc -n ${params.NAMESPACE}
+                        
+                        echo "Waiting for all pods to be ready..."
+                        kubectl --kubeconfig=${KUBECONFIG} wait --for=condition=ready pod \
+                            --all -n ${params.NAMESPACE} --timeout=600s
+                        
+                        echo "Deployment verification completed successfully!"
+                    """
+                }
+            }
+        }
+        
+        stage('Get Access Information') {
+            when {
+                expression { params.ACTION == 'deploy' || params.ACTION == 'upgrade' }
+            }
+            steps {
+                script {
+                    echo "Getting access information..."
+                    sh """
+                        echo "=== Grafana Access Information ==="
+                        kubectl --kubeconfig=${KUBECONFIG} get svc -n ${params.NAMESPACE} | grep grafana
+                        
+                        echo "=== Getting Grafana Admin Password ==="
+                        kubectl --kubeconfig=${KUBECONFIG} get secret lgtm-stack-grafana \
+                            -n ${params.NAMESPACE} \
+                            -o jsonpath="{.data.admin-password}" | base64 --decode
+                        echo ""
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "LGTM Stack deployment completed successfully!"
+            script {
+                if (params.ACTION != 'rollback') {
+                    sh """
+                        echo "Deployment Summary:"
+                        helm list -n ${params.NAMESPACE}
+                    """
+                }
+            }
+        }
+        failure {
+            echo "LGTM Stack deployment failed!"
+            script {
+                sh """
+                    echo "Checking failed pods..."
+                    kubectl --kubeconfig=${KUBECONFIG} get pods -n ${params.NAMESPACE} | grep -v Running || true
+                    
+                    echo "Recent events..."
+                    kubectl --kubeconfig=${KUBECONFIG} get events -n ${params.NAMESPACE} --sort-by='.lastTimestamp' | tail -20
+                """
+            }
+        }
+        always {
+            echo "Cleaning up workspace..."
+            cleanWs()
+        }
+    }
+}

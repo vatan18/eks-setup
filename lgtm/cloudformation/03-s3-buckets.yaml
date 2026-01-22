@@ -1,0 +1,315 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'S3 Buckets for LGTM Stack - Loki, Tempo, and Mimir storage'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  ClusterName:
+    Type: String
+    Default: my-eks-cluster
+    Description: Name of the EKS cluster
+  
+  EnableVersioning:
+    Type: String
+    Default: 'true'
+    Description: Enable versioning on S3 buckets
+    AllowedValues:
+      - 'true'
+      - 'false'
+  
+  EnableLifecyclePolicy:
+    Type: String
+    Default: 'true'
+    Description: Enable lifecycle policies for cost optimization
+    AllowedValues:
+      - 'true'
+      - 'false'
+  
+  RetentionDays:
+    Type: Number
+    Default: 90
+    Description: Number of days to retain data before transitioning to IA
+    MinValue: 30
+    MaxValue: 365
+
+Conditions:
+  EnableVersioningCondition: !Equals [!Ref EnableVersioning, 'true']
+  EnableLifecyclePolicyCondition: !Equals [!Ref EnableLifecyclePolicy, 'true']
+
+Resources:
+  # ========================================
+  # Loki S3 Bucket
+  # ========================================
+  
+  LokiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ClusterName}-loki-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      
+      VersioningConfiguration:
+        !If
+          - EnableVersioningCondition
+          - Status: Enabled
+          - !Ref AWS::NoValue
+      
+      LifecycleConfiguration:
+        !If
+          - EnableLifecyclePolicyCondition
+          - Rules:
+              - Id: TransitionToIA
+                Status: Enabled
+                Transitions:
+                  - TransitionInDays: !Ref RetentionDays
+                    StorageClass: STANDARD_IA
+                  - TransitionInDays: !Add [!Ref RetentionDays, 90]
+                    StorageClass: GLACIER_IR
+              - Id: DeleteOldVersions
+                Status: Enabled
+                NoncurrentVersionTransitions:
+                  - TransitionInDays: 30
+                    StorageClass: STANDARD_IA
+                NoncurrentVersionExpirationInDays: 90
+              - Id: CleanupIncompleteUploads
+                Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 7
+          - !Ref AWS::NoValue
+      
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-loki-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Loki
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  LokiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LokiBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LokiBucket.Arn
+              - !Sub '${LokiBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ========================================
+  # Tempo S3 Bucket
+  # ========================================
+  
+  TempoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ClusterName}-tempo-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      
+      VersioningConfiguration:
+        !If
+          - EnableVersioningCondition
+          - Status: Enabled
+          - !Ref AWS::NoValue
+      
+      LifecycleConfiguration:
+        !If
+          - EnableLifecyclePolicyCondition
+          - Rules:
+              - Id: TransitionToIA
+                Status: Enabled
+                Transitions:
+                  - TransitionInDays: 30
+                    StorageClass: STANDARD_IA
+                  - TransitionInDays: 60
+                    StorageClass: GLACIER_IR
+                  - TransitionInDays: 180
+                    StorageClass: DEEP_ARCHIVE
+              - Id: ExpireOldTraces
+                Status: Enabled
+                ExpirationInDays: 365
+              - Id: DeleteOldVersions
+                Status: Enabled
+                NoncurrentVersionTransitions:
+                  - TransitionInDays: 30
+                    StorageClass: STANDARD_IA
+                NoncurrentVersionExpirationInDays: 90
+              - Id: CleanupIncompleteUploads
+                Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 7
+          - !Ref AWS::NoValue
+      
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-tempo-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Tempo
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TempoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TempoBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TempoBucket.Arn
+              - !Sub '${TempoBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ========================================
+  # Mimir S3 Bucket
+  # ========================================
+  
+  MimirBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ClusterName}-mimir-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      
+      VersioningConfiguration:
+        !If
+          - EnableVersioningCondition
+          - Status: Enabled
+          - !Ref AWS::NoValue
+      
+      LifecycleConfiguration:
+        !If
+          - EnableLifecyclePolicyCondition
+          - Rules:
+              - Id: TransitionToIA
+                Status: Enabled
+                Transitions:
+                  - TransitionInDays: !Ref RetentionDays
+                    StorageClass: STANDARD_IA
+                  - TransitionInDays: !Add [!Ref RetentionDays, 90]
+                    StorageClass: GLACIER_IR
+              - Id: DeleteOldVersions
+                Status: Enabled
+                NoncurrentVersionTransitions:
+                  - TransitionInDays: 30
+                    StorageClass: STANDARD_IA
+                NoncurrentVersionExpirationInDays: 90
+              - Id: CleanupIncompleteUploads
+                Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 7
+          - !Ref AWS::NoValue
+      
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-mimir-bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Mimir
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  MimirBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MimirBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt MimirBucket.Arn
+              - !Sub '${MimirBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  LokiBucketName:
+    Description: Name of the Loki S3 bucket
+    Value: !Ref LokiBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LokiBucketName'
+
+  LokiBucketArn:
+    Description: ARN of the Loki S3 bucket
+    Value: !GetAtt LokiBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LokiBucketArn'
+
+  TempoBucketName:
+    Description: Name of the Tempo S3 bucket
+    Value: !Ref TempoBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-TempoBucketName'
+
+  TempoBucketArn:
+    Description: ARN of the Tempo S3 bucket
+    Value: !GetAtt TempoBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TempoBucketArn'
+
+  MimirBucketName:
+    Description: Name of the Mimir S3 bucket
+    Value: !Ref MimirBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-MimirBucketName'
+
+  MimirBucketArn:
+    Description: ARN of the Mimir S3 bucket
+    Value: !GetAtt MimirBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MimirBucketArn'

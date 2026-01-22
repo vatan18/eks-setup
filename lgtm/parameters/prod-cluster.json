@@ -1,0 +1,10 @@
+[
+  {
+    "ParameterKey": "ClusterName",
+    "ParameterValue": "my-eks-cluster"
+  },
+  {
+    "ParameterKey": "KubernetesVersion",
+    "ParameterValue": "1.31"
+  }
+]

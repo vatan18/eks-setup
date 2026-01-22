@@ -1,0 +1,395 @@
+# helm-values/lgtm-prod-values.yaml
+# Production LGTM Stack Configuration with Taints and Tolerations
+
+# Global settings
+global:
+  clusterDomain: cluster.local
+  dnsService: kube-dns
+  dnsNamespace: kube-system
+
+# Loki Configuration
+loki:
+  enabled: true
+  
+  # Tolerations for monitoring nodegroup
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "monitoring"
+      effect: "NoSchedule"
+  
+  # Node affinity for monitoring nodes
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "workload"
+                operator: "In"
+                values:
+                  - "monitoring"
+  
+  # Resource requests and limits
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  
+  # Persistence
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 100Gi
+  
+  # Replication
+  replication_factor: 3
+  
+  # Retention
+  retention_period: 30d
+  
+  # Distributor
+  distributor:
+    replicas: 3
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Ingester
+  ingester:
+    replicas: 3
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Querier
+  querier:
+    replicas: 3
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Query Frontend
+  queryFrontend:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
+# Grafana Configuration
+grafana:
+  enabled: true
+  
+  replicas: 2
+  
+  # Tolerations
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "monitoring"
+      effect: "NoSchedule"
+  
+  # Node affinity
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "workload"
+                operator: "In"
+                values:
+                  - "monitoring"
+  
+  # Resources
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  
+  # Persistence for dashboards and data
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 10Gi
+  
+  # Admin credentials (use secrets in production)
+  adminUser: admin
+  # adminPassword: should be set via secret
+  
+  # Service
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  
+  # Ingress (alternative to LoadBalancer)
+  ingress:
+    enabled: false
+    ingressClassName: nginx
+    hosts:
+      - grafana.yourdomain.com
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.yourdomain.com
+  
+  # Data sources (auto-configured for LGTM)
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Loki
+          type: loki
+          access: proxy
+          url: http://lgtm-stack-loki-gateway
+          isDefault: false
+        - name: Tempo
+          type: tempo
+          access: proxy
+          url: http://lgtm-stack-tempo-gateway:3100
+          isDefault: false
+        - name: Mimir
+          type: prometheus
+          access: proxy
+          url: http://lgtm-stack-mimir-gateway/prometheus
+          isDefault: true
+
+# Tempo Configuration
+tempo:
+  enabled: true
+  
+  # Tolerations
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "monitoring"
+      effect: "NoSchedule"
+  
+  # Node affinity
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "workload"
+                operator: "In"
+                values:
+                  - "monitoring"
+  
+  # Distributor
+  distributor:
+    replicas: 3
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Ingester
+  ingester:
+    replicas: 3
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Querier
+  querier:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Compactor
+  compactor:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Storage configuration
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: your-tempo-traces-bucket
+        region: us-east-1
+        # Use IRSA for authentication
+        insecure: false
+
+# Mimir Configuration
+mimir:
+  enabled: true
+  
+  # Tolerations
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "monitoring"
+      effect: "NoSchedule"
+  
+  # Node affinity
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "workload"
+                operator: "In"
+                values:
+                  - "monitoring"
+  
+  # Distributor
+  distributor:
+    replicas: 3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Ingester
+  ingester:
+    replicas: 3
+    persistence:
+      enabled: true
+      size: 100Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 2000m
+        memory: 4Gi
+      limits:
+        cpu: 4000m
+        memory: 8Gi
+  
+  # Store Gateway
+  store_gateway:
+    replicas: 3
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Compactor
+  compactor:
+    replicas: 2
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClassName: gp3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Querier
+  querier:
+    replicas: 3
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  
+  # Query Frontend
+  query_frontend:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  
+  # Storage configuration
+  storage:
+    backend: s3
+    s3:
+      bucket: your-mimir-blocks-bucket
+      region: us-east-1
+      # Use IRSA for authentication
+
+# Service Account with IRSA
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::YOUR_ACCOUNT_ID:role/lgtm-stack-irsa-role
+  name: lgtm-stack-sa
+
+# Pod Security Standards
+podSecurityPolicy:
+  enabled: false
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true

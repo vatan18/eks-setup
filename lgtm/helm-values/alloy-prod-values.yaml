@@ -1,0 +1,309 @@
+# helm-values/alloy-prod-values.yaml
+# Grafana Alloy Configuration for Production
+
+alloy:
+  # Deploy as DaemonSet to collect from all nodes
+  mode: daemonset
+  
+  # Tolerations to run on all nodes including monitoring nodes
+  tolerations:
+    - operator: "Exists"
+      effect: "NoSchedule"
+    - operator: "Exists"
+      effect: "NoExecute"
+  
+  # Resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  
+  # Security context
+  securityContext:
+    privileged: false
+    runAsUser: 0  # Required for log collection
+    runAsGroup: 0
+  
+  # Mount host paths for log collection
+  extraVolumes:
+    - name: varlog
+      hostPath:
+        path: /var/log
+    - name: varlibdockercontainers
+      hostPath:
+        path: /var/lib/docker/containers
+  
+  extraVolumeMounts:
+    - name: varlog
+      mountPath: /var/log
+      readOnly: true
+    - name: varlibdockercontainers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+  
+  # Service account
+  serviceAccount:
+    create: true
+    name: grafana-alloy
+
+# Alloy configuration
+configMap:
+  create: true
+  content: |
+    // Logging configuration
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // Discover pods for log collection
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+
+    // Relabel discovered pods
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+      
+      // Keep only running pods
+      rule {
+        source_labels = ["__meta_kubernetes_pod_phase"]
+        action        = "keep"
+        regex         = "Running"
+      }
+      
+      // Add namespace label
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      
+      // Add pod name label
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      
+      // Add container name label
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+      
+      // Set log path
+      rule {
+        source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+        target_label  = "__path__"
+        separator     = "/"
+        replacement   = "/var/log/pods/*$1/*.log"
+      }
+    }
+
+    // Scrape logs from discovered pods
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.pods.receiver]
+    }
+
+    // Process logs
+    loki.process "pods" {
+      forward_to = [loki.write.loki.receiver]
+      
+      // Parse JSON logs
+      stage.json {
+        expressions = {
+          level   = "level",
+          message = "msg",
+        }
+      }
+      
+      // Add labels
+      stage.labels {
+        values = {
+          level = "",
+        }
+      }
+    }
+
+    // Send logs to Loki
+    loki.write "loki" {
+      endpoint {
+        url = "http://lgtm-stack-loki-gateway.lgtm-stack.svc.cluster.local/loki/api/v1/push"
+        
+        // Batching configuration
+        batch_wait = "1s"
+        batch_size = 1048576  // 1MB
+      }
+    }
+
+    // ===== Metrics Collection =====
+    
+    // Discover Kubernetes nodes
+    discovery.kubernetes "nodes" {
+      role = "node"
+    }
+
+    // Scrape kubelet metrics
+    prometheus.scrape "kubelet" {
+      targets    = discovery.kubernetes.nodes.targets
+      forward_to = [prometheus.relabel.kubelet.receiver]
+      scheme     = "https"
+      bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      tls_config {
+        insecure_skip_verify = true
+      }
+    }
+
+    // Relabel kubelet metrics
+    prometheus.relabel "kubelet" {
+      forward_to = [prometheus.remote_write.mimir.receiver]
+      
+      rule {
+        source_labels = ["__address__"]
+        target_label  = "__address__"
+        replacement   = "$1:10250"
+      }
+    }
+
+    // Discover service endpoints
+    discovery.kubernetes "services" {
+      role = "endpoints"
+    }
+
+    // Scrape service metrics
+    prometheus.scrape "services" {
+      targets    = discovery.kubernetes.services.targets
+      forward_to = [prometheus.relabel.services.receiver]
+    }
+
+    // Relabel service metrics
+    prometheus.relabel "services" {
+      forward_to = [prometheus.remote_write.mimir.receiver]
+      
+      // Keep only endpoints with prometheus.io/scrape annotation
+      rule {
+        source_labels = ["__meta_kubernetes_service_annotation_prometheus_io_scrape"]
+        action        = "keep"
+        regex         = "true"
+      }
+      
+      // Use custom scrape path if specified
+      rule {
+        source_labels = ["__meta_kubernetes_service_annotation_prometheus_io_path"]
+        action        = "replace"
+        target_label  = "__metrics_path__"
+        regex         = "(.+)"
+      }
+      
+      // Use custom port if specified
+      rule {
+        source_labels = ["__address__", "__meta_kubernetes_service_annotation_prometheus_io_port"]
+        action        = "replace"
+        target_label  = "__address__"
+        regex         = "([^:]+)(?::\\d+)?;(\\d+)"
+        replacement   = "$1:$2"
+      }
+      
+      // Add namespace label
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      
+      // Add service name label
+      rule {
+        source_labels = ["__meta_kubernetes_service_name"]
+        target_label  = "service"
+      }
+    }
+
+    // Send metrics to Mimir
+    prometheus.remote_write "mimir" {
+      endpoint {
+        url = "http://lgtm-stack-mimir-gateway.lgtm-stack.svc.cluster.local/api/v1/push"
+        
+        // Queue configuration
+        queue_config {
+          capacity             = 10000
+          max_shards           = 50
+          max_samples_per_send = 5000
+        }
+      }
+    }
+
+    // ===== Traces Collection =====
+    
+    // Receive OTLP traces over gRPC
+    otelcol.receiver.otlp "default" {
+      grpc {
+        endpoint = "0.0.0.0:4317"
+      }
+      
+      http {
+        endpoint = "0.0.0.0:4318"
+      }
+      
+      output {
+        traces  = [otelcol.processor.batch.default.input]
+      }
+    }
+
+    // Batch traces
+    otelcol.processor.batch "default" {
+      output {
+        traces  = [otelcol.exporter.otlp.tempo.input]
+      }
+    }
+
+    // Send traces to Tempo
+    otelcol.exporter.otlp "tempo" {
+      client {
+        endpoint = "lgtm-stack-tempo-gateway.lgtm-stack.svc.cluster.local:4317"
+        tls {
+          insecure = true
+        }
+      }
+    }
+
+# RBAC Configuration
+rbac:
+  create: true
+
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources:
+        - nodes
+        - nodes/proxy
+        - services
+        - endpoints
+        - pods
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources:
+        - configmaps
+      verbs: ["get"]
+    - nonResourceURLs:
+        - /metrics
+      verbs: ["get"]
+
+clusterRoleBinding:
+  create: true
+
+# Service for traces
+service:
+  enabled: true
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
